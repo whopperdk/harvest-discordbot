@@ -11,6 +11,7 @@ import os
 import re
 from discord.ext.commands import Bot
 from discord.ext import commands, tasks
+from discord import app_commands
 from web3 import Web3
 from dotenv import load_dotenv
 
@@ -487,7 +488,9 @@ def emissions(weeknum):
         supply_this_week = sum(earlyemissions[:weeknum])
     return emitted_this_week, supply_this_week
 
-client = discord.Client(command_prefix='!')
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 activity_start = discord.Streaming(
                 name='node desynced',
                 url='https://uniswap.info/token/0xa0246c9032bc3a600820415ae600c6388619a14d'
@@ -499,6 +502,7 @@ async def on_ready():
     await client.change_presence(activity=activity_start)
     update_price.start()
     check_tractor.start()
+    await tree.sync()
 
 @tasks.loop(seconds=UPDATE_SECONDS)
 async def update_price():
@@ -569,9 +573,7 @@ async def check_tractor():
                     )
         await channel.send(embed=embed)
 
-
-@client.event
-async def on_message(msg):
+async def handle_command(msg):
     if client.user.id != msg.author.id:
         if '!foo' in msg.content:
             await msg.channel.send('bar')
@@ -1320,6 +1322,52 @@ def get_vaultstate(vault):
     except Exception as e:
         pass
     return (vault_address, vault_shareprice, vault_total, vault_buffer, vault_target, vault_strat, vault_strat_future, vault_strat_future_time)
+ 
+ 
+class _InteractionMessage:
+    """Minimal discord.Message-like shim so slash commands can be replayed
+    through the existing handle_command() logic without any changes to it."""
+ 
+    def __init__(self, interaction: discord.Interaction, content: str):
+        self.content = content
+        self.author = interaction.user
+        self.channel = self  # give ourselves a .send() to stand in for msg.channel
+        self._interaction = interaction
+ 
+    async def send(self, *args, **kwargs):
+        # first reply must go through interaction.response; anything after
+        # that (e.g. the second embed in !limit) has to use followup
+        if not self._interaction.response.is_done():
+            await self._interaction.response.send_message(*args, **kwargs)
+        else:
+            await self._interaction.followup.send(*args, **kwargs)
+ 
+ 
+# Every "!word" your on_message() checks for, minus the leading "!".
+# Add/remove names here and the matching slash command follows automatically.
+SLASH_COMMANDS = [
+    'foo', 'bot', 'bsc', 'bfarm', 'tractor', 'payout', 'contribute',
+    'apr', 'supply', 'trade', 'vault', 'profitshare', 'uniswap',
+    'returns', 'portfolio', 'limit', 'matic', 'borrow',
+]
+ 
+ 
+def register_slash_command(name: str):
+    """The one function that, called for each command name, wires up a
+    slash command that replays through the existing handle_command logic."""
+ 
+    @tree.command(name=name, description=f'Run the !{name} command')
+    @app_commands.describe(args=f'Arguments for !{name} (optional)')
+    async def _slash(interaction: discord.Interaction, args: str = ''):
+        await interaction.response.defer()  # extends the reply window from 3s to 15min
+        content = f'!{name} {args}'.strip()
+        await handle_command(_InteractionMessage(interaction, content))
+ 
+    return _slash
+ 
+ 
+for _cmd_name in SLASH_COMMANDS:
+    register_slash_command(_cmd_name)
 
 def main():
     print(f'starting discord bot...')
